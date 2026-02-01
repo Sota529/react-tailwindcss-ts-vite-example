@@ -2,7 +2,7 @@
 
 ## 使用技術
 
-このプロジェクトは以下のツールを使用しています：
+このプロジェクトは以下のツールを使用しています
 
 - [Vite](https://vitejs.dev)
 - [ReactJS](https://reactjs.org)
@@ -13,16 +13,13 @@
 - [Eslint](https://eslint.org)
 - [Prettier](https://prettier.io)
 
-
 ### pnpm のインストール
 
 このプロジェクトはパッケージマネージャーとして [pnpm](https://pnpm.io/ja/) を使用しています。
 
-
 ```bash
 curl -fsSL https://get.pnpm.io/install.sh | sh -
 ```
-
 
 ### 依存関係のインストール
 
