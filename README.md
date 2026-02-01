@@ -21,6 +21,34 @@
 curl -fsSL https://get.pnpm.io/install.sh | sh -
 ```
 
+## Docker を使用した開発環境起動
+
+開発モードで <http://localhost:5173> にてサーバーを起動します
+初回またはDockerfileを変更した場合：
+
+```bash
+docker compose up --build
+```
+
+2回目以降：
+```bash
+docker compose up
+```
+
+バックグラウンドで起動する場合：
+
+```bash
+docker compose up -d
+```
+
+停止：
+
+```bash
+docker compose down
+```
+
+## ローカル環境での起動
+
 ### 依存関係のインストール
 
 ```bash
