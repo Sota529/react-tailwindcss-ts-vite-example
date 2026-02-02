@@ -1,0 +1,62 @@
+name: Deploy to Amazon S3 stg
+
+on:
+  push:
+    branches:
+      - develop
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run lint
+        run: pnpm lint
+
+      - name: Run build
+        run: pnpm build
+
+      - name: Verify build output
+        run: |
+          if [ ! -d "dist" ] || [ -z "$(ls -A dist)" ]; then
+            echo "Error: dist directory is missing or empty"
+            exit 1
+          fi
+          echo "Build output verified successfully"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME_STG }}
+          aws-region: ${{ secrets.AWS_REGION_STG }}
+
+      - name: Deploy to S3
+        run: |
+          aws s3 sync dist/ s3://${{ secrets.S3_BUCKET_NAME_STG }}/ \
+            --delete \
+            --cache-control "public,max-age=31536000,immutable" \
+            --exclude "*.html" \
+            --exclude "*.json"
+          aws s3 sync dist/ s3://${{ secrets.S3_BUCKET_NAME_STG }}/ \
+            --exclude "*" \
+            --include "*.html" \
+            --include "*.json" \
+            --cache-control "public,max-age=0,must-revalidate"

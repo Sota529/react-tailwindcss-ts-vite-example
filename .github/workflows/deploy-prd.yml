@@ -1,4 +1,4 @@
-name: Deploy to S3
+name: Deploy to Amazon S3 prd
 
 on:
   push:
@@ -45,17 +45,17 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME_PRD }}
+          aws-region: ${{ secrets.AWS_REGION_PRD }}
 
       - name: Deploy to S3
         run: |
-          aws s3 sync dist/ s3://${{ secrets.S3_BUCKET_NAME }}/ \
+          aws s3 sync dist/ s3://${{ secrets.S3_BUCKET_NAME_PRD }}/ \
             --delete \
             --cache-control "public,max-age=31536000,immutable" \
             --exclude "*.html" \
             --exclude "*.json"
-          aws s3 sync dist/ s3://${{ secrets.S3_BUCKET_NAME }}/ \
+          aws s3 sync dist/ s3://${{ secrets.S3_BUCKET_NAME_PRD }}/ \
             --exclude "*" \
             --include "*.html" \
             --include "*.json" \
