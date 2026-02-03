@@ -10,8 +10,7 @@
 - [Vitest](https://vitest.dev)
 - [Testing Library](https://testing-library.com)
 - [Tailwindcss](https://tailwindcss.com)
-- [Eslint](https://eslint.org)
-- [Prettier](https://prettier.io)
+- [Biome](https://biomejs.dev)
 
 ### pnpm のインストール
 
@@ -68,6 +67,18 @@ pnpm run dev
 
 ```bash
 pnpm run lint
+```
+
+Lint の問題を自動修正する場合：
+
+```bash
+pnpm run lint:fix
+```
+
+### フォーマット
+
+```bash
+pnpm run format
 ```
 
 ### 型チェック
