@@ -35,11 +35,6 @@ docker compose up --build
 docker compose up
 ```
 
-バックグラウンドで起動する場合：
-
-```bash
-docker compose up -d
-```
 
 停止：
 
