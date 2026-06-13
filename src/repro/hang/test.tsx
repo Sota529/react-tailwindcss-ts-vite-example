@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react'
 import { expect, it } from 'vitest'
-import { Ticker, getMountCount } from './Ticker'
+import { getMountCount, Ticker } from './Ticker'
 
 /**
  * 症状B: クラッシュ/ハング。

@@ -17,7 +17,7 @@ export const Ticker = () => {
     // 意図的に clearInterval しない（cleanup 漏れの再現）。
     // cleanup が走らないと、テスト終了後も timer が生き残り、
     // アンマウント済みコンポーネントへの setState が走り続けてワーカーがハングする。
-    setInterval(() => setTick(t => t + 1), 50)
+    setInterval(() => setTick((t) => t + 1), 50)
     return undefined
   }, [])
 
