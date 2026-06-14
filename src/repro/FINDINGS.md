@@ -123,4 +123,26 @@ cleanup も `isolate:false` も「正しく」効いている以上、残る原�
 2. fake timers 未復元（`vi.useRealTimers()` 漏れ）/ globalThis・window 素プロパティ / `process.env` 直代入 / `vi.stubGlobal` / `Object.defineProperty(global)`。
 
 ### 次アクション（Step 0: 実エラー採取）
-Copernicus 側で対象テスト群を `--no-file-parallelism` で同居実行し、各 FAIL の**実エラー**を採取 → 上表のどのベクタに該当するか対応付ける → singleton は per-test fresh 化、timer/global/env は明示 teardown（`useRealTimers`/`unstubAllGlobals`/`unstubAllEnvs`、global afterEach での撤去）で対応する。
+Copernicus 側で対象テスト群を `--no-file-parallelism` で同居実行し、各 FAIL の**実エラー**を採取 → 下表のどのベクタに該当するか対応付ける → 表の処方箋を適用する。
+
+### Copernicus 実構成での残存ベクタ実測（globals + clearMocks + restoreMocks + isolate:false）
+Copernicus の追加設定 `clearMocks: true` / `restoreMocks: true` も込みで、本 repo の probe 全ベクタをペア同居実行（`--no-file-parallelism`）して「まだ漏れるか」を実測した。
+**結論: `clearMocks`/`restoreMocks` が直したのは mock/spy 系だけ。永続状態ベクタは依然として全部漏れる。**
+
+| ベクタ | clearMocks+restoreMocks のみ | +`unstubGlobals`/`unstubEnvs` | 処方箋 |
+|---|---|---|---|
+| `spyraf`（`vi.spyOn`） | ✅ PASS | ✅ | `restoreMocks` で解消済み |
+| `vimock`（`vi.mock`） | ✅ PASS | ✅ | ファイル単位で再適用（リークしない） |
+| `domresidue`（DOM 残留） | ✅ PASS | ✅ | `globals:true` の testing-library 自動 cleanup |
+| `gtlistener`/`winlistener` | ✅ PASS | ✅ | （この構成では非リーク） |
+| `stubglobal`（`vi.stubGlobal`） | ❌ FAIL | ✅ **PASS** | **`unstubGlobals: true` を追加**（restoreMocks では戻らない） |
+| `procenv`（`process.env.X=` 直代入） | ❌ FAIL | ❌ FAIL | `unstubEnvs` は `vi.stubEnv` 専用。**直代入は `vi.stubEnv()` に書き換える**か手動復元 |
+| `faketimers`（`vi.useFakeTimers`） | ❌ FAIL | ❌ FAIL | config フラグでは不可。**`afterEach(() => vi.useRealTimers())`**（setup で global 登録） |
+| `modsingleton` / `jotai-leak` / `rq-leak` / `shared` | ❌ FAIL | ❌ FAIL | config 不可。**test 毎に fresh インスタンス**（`createStore()` / `new QueryClient()`、SUT へ注入） |
+| `gprop`/`winprop`/`defineprop`（global/window 直書き） | ❌ FAIL | ❌ FAIL | config 不可。**global を直接汚さない**／setup で snapshot→`afterEach` 復元 |
+
+→ Copernicus への具体処方:
+1. config に **`unstubGlobals: true`**（できれば `unstubEnvs: true` も）を追加。`vi.stubGlobal`/`vi.stubEnv` 経由の汚染を一掃。
+2. fake timers を使うテストは **`afterEach(() => vi.useRealTimers())`** を setup ファイルに global 登録。
+3. module singleton（jotai デフォルトストア / module-level `QueryClient`）を **per-test fresh** 化し SUT に注入（最重要・config では直せない）。
+4. `process.env` 直代入と global/window 直書きは、**`vi.stubEnv`/`vi.stubGlobal` 経由に統一**（→ 1 の自動復元に乗る）か、手動 teardown。
