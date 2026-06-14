@@ -173,3 +173,30 @@ Copernicus の追加設定 `clearMocks: true` / `restoreMocks: true` も込み�
 
 ### 次の instrumentation
 `queryFn` mock 内で返す promise の identity と settle をログし、`QueryClient` のキャッシュ状態を直接読む。spyOn mock は `beforeEach` 内で再設定して `restoreMocks` との順序を確認する。useRef は容疑から外す。
+
+## 真因2系統を harness で再現・確定（`src/repro/rqcross/`）
+
+採取データの2つの容疑を最小ケースで再現・切り分けた。**いずれも「timeout」を生むが、シグネチャ（単独で落ちるか）が異なる**ため、どのファイルがどちらかを判別できる。
+
+### (1) fake timers 残留 → RQ `waitFor` timeout  ✅再現
+`rqcross/ftseq/test.tsx`: test1 が `vi.useFakeTimers()` を呼び戻さない → test2（`renderHook + waitFor`）が **Test timed out**。
+- 機序: `queryFn`（`async () => 'OK'`）は microtask で resolve し query は内部的に success になるが、`waitFor` のポーリング/タイムアウトは**進まない fake timer**に乗るため再チェックされず hang。`clearMocks`/`restoreMocks` はタイマーを戻さない。
+- **失敗テスト時点の `vi.isFakeTimers()` は `true`**（残留しているから）。→ 採取で `isFakeTimers:false` だったファイルは、純粋なこの機序では説明できない（観測タイミング差か、別ファイル由来の漏れか要確認）。
+- DrawerModal（採取でも timer/RAF 帰属）はこの型。
+- **処方（確認済み）**: setup に global `afterEach(() => vi.useRealTimers())` → test2 も PASS（`rqcross/setup.realtimers.ts`）。
+
+### (2) `restoreMocks: true` × `beforeEach` 外の `spyOn` → `is mock: false` → timeout  ✅再現
+`rqcross/rm-modlevel/test.tsx`（spy を module レベル）と `rm-beforeeach/test.tsx`（spy を `beforeEach`）を `restoreMocks:true` 単独実行で比較:
+
+| spy の設置位置 | 1件目の `vi.isMockFunction(repo.get)` | 結果 |
+|---|---|---|
+| module / `describe` 直下 | **false**（各テスト前の `restoreAllMocks` が剥がす） | 実 API（never-resolve）→ **timeout（単独でも fail）** |
+| `beforeEach` 内 | true（毎回再設定される） | PASS |
+
+- この **`is mock: false` + timeout は採取の campaignRewardPoint と完全一致**。原因は「auto-mock との別インスタンス」より前に、**`restoreMocks:true` が `beforeEach` 外の spy を 1件目から剥がしている**こと（＝**単独でも落ちる**はず。campaignRewardPoint が単独で pass なら別機序＝`vi.resetModules()`+`await import` のインスタンス不一致が残る）。
+- **処方**: `spyOn(...).mockResolvedValue(...)` を **`beforeEach` 内へ移す**、または `vi.mock('~/repositories', ...)` を明示宣言。
+
+### 判別フロー（Copernicus 各ファイルへの当て方）
+1. **単独でも timeout** → (2) 系（`restoreMocks` × spy 位置 or インスタンス不一致）。`is mock` を確認。
+2. **単独 pass / 同居のみ timeout** かつ失敗時 `isFakeTimers:true` → (1) 系（fake timers 残留）。
+3. **単独 pass / 同居のみ timeout** かつ `isFakeTimers:false` かつ `is mock:true, calls:1` → 未解明（共有 `QueryClient` の in-flight/cache 汚染が次の容疑）。useRef は反証済みで除外。
