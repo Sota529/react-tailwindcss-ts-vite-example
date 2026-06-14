@@ -98,3 +98,29 @@ happy-dom / vitest のバージョンによっては listener が「漏れる側
   本丸ベクタでも到達可能、と実証された。
 - 実プロジェクトへの適用: SUT が module-level の `queryClient`（`getQueryData`/`setQueryData`）や jotai デフォルトストアを
   参照していないか確認し、テスト毎の fresh インスタンスを SUT に届ける形へ直す。
+
+## 実プロジェクト（Copernicus）との対応 — 原因1・原因2 は該当しない
+
+確認した Copernicus の構成: **`vitest.workspace.ts` 使用 / `globals: true`（project 側）/ `isolate: false` はルート `vite.config.ts` の `test`**。
+この構成を本 repo で正確に再現し（実ファイルを一時差し替え→素の `vitest` で自動検出）、`shared/`（globalThis 横断カウンタ＝isolate 検出器）で `isolate:false` の効き場所を実測した。
+
+| `isolate: false` の置き場所 | workspace テストへの適用 | shared 検出器の実測 |
+|---|---|---|
+| workspace **project** の `test` | **無視される**（`isolate` は root-only オプション） | PASS（漏れない＝適用されていない） |
+| **ルート** `vite.config.ts` の `test` | **適用される** | FAIL（漏れる＝isolate:false 有効） |
+| CLI `--no-isolate` | 適用される | FAIL（漏れる） |
+
+→ **Copernicus は `isolate: false` をルートに書いており、workspace テストに実際に適用されている**（＝意図通り isolate:false で走っている）。かつ `globals: true` で testing-library の自動 cleanup も有効。
+
+したがって本ドキュメント前半の2原因は **Copernicus には当てはまらない**:
+- **原因1（workspace が globals 未継承→自動 cleanup 無効化）→ 該当しない**。Copernicus は `globals: true`。
+- **原因2（`isolate` を workspace project に書くと無視）→ 該当しない**。Copernicus はルートに正しく配置済み。
+  （※ 原因1・原因2 は私の repro が「globals 省略 / isolate を project に記述」という典型ミスを意図的に作って観測したアーティファクトであり、Copernicus はどちらも回避できている。）
+
+### Copernicus の不安定さの真因候補
+cleanup も `isolate:false` も「正しく」効いている以上、残る原因は **cleanup では消えない「Node worker に永続する状態」ベクタ**に絞られる（上の probe マトリクス／singleton セクションがそのまま該当）:
+1. **module singleton**（jotai デフォルトストア / module-level `QueryClient`）← 実アプリ最大の汚染源。singleton セクションで「漏れる→ test 毎 fresh で直る」を実証済み。
+2. fake timers 未復元（`vi.useRealTimers()` 漏れ）/ globalThis・window 素プロパティ / `process.env` 直代入 / `vi.stubGlobal` / `Object.defineProperty(global)`。
+
+### 次アクション（Step 0: 実エラー採取）
+Copernicus 側で対象テスト群を `--no-file-parallelism` で同居実行し、各 FAIL の**実エラー**を採取 → 上表のどのベクタに該当するか対応付ける → singleton は per-test fresh 化、timer/global/env は明示 teardown（`useRealTimers`/`unstubAllGlobals`/`unstubAllEnvs`、global afterEach での撤去）で対応する。
