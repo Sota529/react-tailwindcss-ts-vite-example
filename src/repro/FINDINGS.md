@@ -78,3 +78,23 @@ CLI の `--no-isolate`、またはルートの `test` 設定に書く必要が�
 ### 注意（バージョン差）
 event listener / requestAnimationFrame がこの repo（happy-dom 15 / vitest 1.6）で「漏れない側」なのは環境がファイル毎に初期化するため。
 happy-dom / vitest のバージョンによっては listener が「漏れる側」に入ることがある（その場合は setup の global afterEach で listener 撤去・`vi.useRealTimers()` 等の明示 teardown が必要）。
+
+## 追加検証: module singleton の「漏れる→fresh-per-test で直る」実証（`src/repro/singleton/`）
+
+実アプリで最大の汚染源になる **module-level singleton の状態**（jotai のストア / react-query の QueryClient）を、
+「共有版＝漏れる」と「test 毎 fresh 版＝漏れない」で対比実証した。`--no-file-parallelism` で同居を強制。
+
+| ケース | isolate:true | isolate:false |
+|---|---|---|
+| jotai `getDefaultStore()` 共有（jotai-leak） | PASS | **FAIL（漏れる）** |
+| jotai test 毎 `createStore()`（jotai-fix） | — | **PASS** |
+| react-query module-level `new QueryClient()` 共有（rq-leak） | PASS | **FAIL（漏れる）** |
+| react-query test 毎 `new QueryClient()`（rq-fix） | — | **PASS** |
+
+### 結論
+- module singleton の状態は isolate:false でファイル間に漏れる（jotai デフォルトストア・module-level QueryClient キャッシュ）。
+- ただし **test 毎に fresh インスタンス（jotai は `createStore()`、react-query は `new QueryClient()`）にすれば
+  isolate:false のままでも漏れない**。→ 「isolate:false で全テストを安定させる」ことは、共有 singleton を排除すれば
+  本丸ベクタでも到達可能、と実証された。
+- 実プロジェクトへの適用: SUT が module-level の `queryClient`（`getQueryData`/`setQueryData`）や jotai デフォルトストアを
+  参照していないか確認し、テスト毎の fresh インスタンスを SUT に届ける形へ直す。
