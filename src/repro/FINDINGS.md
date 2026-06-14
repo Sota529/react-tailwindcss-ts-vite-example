@@ -146,3 +146,30 @@ Copernicus の追加設定 `clearMocks: true` / `restoreMocks: true` も込み�
 2. fake timers を使うテストは **`afterEach(() => vi.useRealTimers())`** を setup ファイルに global 登録。
 3. module singleton（jotai デフォルトストア / module-level `QueryClient`）を **per-test fresh** 化し SUT に注入（最重要・config では直せない）。
 4. `process.env` 直代入と global/window 直書きは、**`vi.stubEnv`/`vi.stubGlobal` 経由に統一**（→ 1 の自動復元に乗る）か、手動 teardown。
+
+## Copernicus 動的採取レポートの検証 — `useRef` mock 仮説は再現せず（反証）
+
+実プロジェクト側の動的採取レポートは、5ファイル中4ファイル（AsahiCampaign / paymentCompleteNotify / campaignRewardPoint / CartOrderButton）の `waitFor` timeout の真因を
+「`setup.mock.ts` が `vi.doMock('react', () => react)` で `react.useRef = vi.fn()` にし、React Query の ref ベース状態追跡が壊れて re-render が発火しない」と推定していた。
+これを `src/repro/rqhang/`（React18 + React Query v5 + RTL の `renderHook + waitFor` 最小ケース）で検証した結果、**この機序は再現しなかった**。
+
+| 検証 | 結果 |
+|---|---|
+| `a/`: useRef mock なし・isolate:false 同居 | ✅ PASS（ハーネス健全性確認） |
+| 文字どおりの `react.useRef = vi.fn()`（mutation） | ❌ `TypeError: Cannot redefine property: useRef` で **setup 自体が落ちる**（react の export は再定義不可）。レポート記載のコードはこのスタックでは実行不可 |
+| `c/`: 正しいスプレッド mock `vi.mock('react', () => ({...actual, useRef: vi.fn()}))` で useRef が undefined を返す | ✅ **PASS（crash も timeout もしない）** |
+
+理由: **reconciler が使う `useRef` は react-dom 内部実装**（共有 dispatcher 経由）であり、ユーザーランドの `React.useRef` mock の影響を受けない。
+→ **「useRef mock が timeout を起こす」は反証。推奨修正#1（useRef mock 除去）は timeout を直さない公算が高い。**
+
+### では真因は何か（採取データの再解釈）
+採取された堅い観測 = 「`queryFn` は呼ばれる（calls:1）／`status: pending, fetchStatus: fetching`／`isFakeTimers: false`」。
+これは **re-render 不発ではなく「queryFn が返す promise が co-resident 時に settle しない」**ことを示す。候補（要追加 instrumentation）:
+- 先行ファイルが残した **fake timers**（promise 内部が `setTimeout` 依存なら microtask は進んでも settle しない）。観測点の `isFakeTimers:false` は当該テスト時点のみで、別ファイル由来の漏れを否定しきれない。
+- spyOn ベースの `queryFn` mock が **`restoreMocks: true` で各テスト前に実装へ戻り**、2件目以降で実 API を叩いて pending（mock 設定が `beforeEach` の外にある場合）。
+- module-level `QueryClient` / 共有 mock の状態汚染。
+  - **campaignRewardPoint の `repo.get is mock: false`（spyOn インスタンス不一致）は採取どおり確定**。上の singleton/spy 分析と一致しており、これは真因として堅い。
+- DrawerModal の fake timer 未復元併発も `faketimers` probe と整合。
+
+### 次の instrumentation
+`queryFn` mock 内で返す promise の identity と settle をログし、`QueryClient` のキャッシュ状態を直接読む。spyOn mock は `beforeEach` 内で再設定して `restoreMocks` との順序を確認する。useRef は容疑から外す。
