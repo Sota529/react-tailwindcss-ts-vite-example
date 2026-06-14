@@ -8,6 +8,8 @@ it('a: useQuery が success になる', async () => {
   // eslint-disable-next-line no-console
   console.log('[a] isFakeTimers:', vi.isFakeTimers())
   const { result } = renderHook(() => useThing(), { wrapper: makeWrapper() })
-  await waitFor(() => expect(result.current.isSuccess).toBe(true), { timeout: 3000 })
+  await waitFor(() => expect(result.current.isSuccess).toBe(true), {
+    timeout: 3000
+  })
   expect(result.current.data).toBe('OK')
 })

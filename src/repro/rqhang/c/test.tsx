@@ -1,4 +1,4 @@
-import { vi, expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 
 // Copernicus 相当: React.useRef を vi.fn()（=undefined を返す）に差し替え
 vi.mock('react', async (orig) => {
@@ -12,5 +12,7 @@ import { makeWrapper } from '../wrapper'
 
 it('c: useRef=vi.fn() のとき crash か timeout か', async () => {
   const { result } = renderHook(() => useThing(), { wrapper: makeWrapper() })
-  await waitFor(() => expect(result.current.isSuccess).toBe(true), { timeout: 3000 })
+  await waitFor(() => expect(result.current.isSuccess).toBe(true), {
+    timeout: 3000
+  })
 })
