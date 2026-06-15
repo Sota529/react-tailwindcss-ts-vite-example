@@ -200,3 +200,45 @@ Copernicus の追加設定 `clearMocks: true` / `restoreMocks: true` も込み�
 1. **単独でも timeout** → (2) 系（`restoreMocks` × spy 位置 or インスタンス不一致）。`is mock` を確認。
 2. **単独 pass / 同居のみ timeout** かつ失敗時 `isFakeTimers:true` → (1) 系（fake timers 残留）。
 3. **単独 pass / 同居のみ timeout** かつ `isFakeTimers:false` かつ `is mock:true, calls:1` → 未解明（共有 `QueryClient` の in-flight/cache 汚染が次の容疑）。useRef は反証済みで除外。
+
+## 目標: `isolate: true` で全テスト pass（安定化テンプレート）
+
+方針転換: 速度狙いの `isolate:false` ではなく **`isolate: true`（安全側）で全 green** を目標にする場合の確定手順。
+
+### 前提検証（実測）
+本 repo を実効 `isolate:true`（root に isolate 未指定）で全 repro 実行 → **クロスファイル系は全 PASS**。
+`shared` / `singleton/*-leak` / `probe/*`（gprop・winprop・defineprop・stubglobal・procenv・faketimers・modsingleton 等の a-b ペア）はすべて緑。
+**`isolate:true` はファイル単位で worker/モジュール/グローバルを作り直すため、クロスファイル汚染は原理的に起きない**（採取で謎だった「単独pass/同居timeout」な4ファイルも、切替だけで解消する公算が高い）。
+
+→ 残るのは **同一ファイル内のテスト間汚染（within-file）だけ**。実測で残った失敗は `leak`（DOM残留）/ `hang`（module状態＋timer漏れ）/ `ftseq`（fake timers残留）の3本のみ。
+
+### Step 1: ドロップイン共通 teardown（`.vitest/setup.stable.ts`）
+これだけで within-file の **DOM残留 / fake timers / stubGlobal / stubEnv** が直る（実測: `leak` と `ftseq` が PASS 化）。
+```ts
+import '@testing-library/jest-dom/vitest'
+import { cleanup } from '@testing-library/react'
+import { afterEach, vi } from 'vitest'
+
+afterEach(() => {
+  cleanup()             // RTL の DOM 残留（globals:false でも確実に）
+  vi.useRealTimers()    // fake timers 残留（clearMocks/restoreMocks では戻らない）
+  vi.unstubAllGlobals() // vi.stubGlobal 残留
+  vi.unstubAllEnvs()    // vi.stubEnv 残留
+})
+```
+
+### Step 2: コードレベルのパターン（setup では直らない／実測で確認）
+| within-file 症状 | 修正パターン | 実証 |
+|---|---|---|
+| `restoreMocks:true` が `beforeEach` 外の `spyOn` を毎テスト剥がす（`is mock:false`→timeout） | `spyOn(...).mockX()` を **`beforeEach` 内へ**（or `vi.mock` 明示） | `rqcross/rm-beforeeach` PASS |
+| module レベル可変状態がテスト間で累積 | リセット口を用意して **`beforeEach` で初期化**（or singleton を避ける） | `hang-fix/` PASS |
+| SUT の解放漏れ（`setInterval`/購読 を cleanup しない） | unmount/cleanup で **`clearInterval` 等を返す** | `hang-fix/Ticker.tsx` |
+
+### 確定結果（実測）
+`isolate:true` ＋ `setup.stable.ts` ＋ 上記コードパターンで、旧失敗群（`leak`/`ftseq`/`hang-fix`/`rm-beforeeach`）が **全 PASS**。
+
+### Copernicus への適用手順
+1. config を **`isolate: true`**（= `isolate:false` を外す。root か CLI。project に書いても無視される点に注意）。
+2. `setupFiles` に **`setup.stable.ts` の afterEach を追加**（既存 setup に足すだけ）。
+3. それでも落ちるファイルは within-file のコード臭 → Step 2 表で対応（`spyOn`→`beforeEach`、module状態の初期化、SUT の cleanup 漏れ）。
+4. トレードオフ: `isolate:true` は `isolate:false` より遅い。速度が要るなら別途 `isolate:false` ＋ 本書前半の per-test fresh 化が必要だが、**「まず全 green」には isolate:true が最短**。
