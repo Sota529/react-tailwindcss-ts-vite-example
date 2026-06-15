@@ -242,3 +242,44 @@ afterEach(() => {
 2. `setupFiles` に **`setup.stable.ts` の afterEach を追加**（既存 setup に足すだけ）。
 3. それでも落ちるファイルは within-file のコード臭 → Step 2 表で対応（`spyOn`→`beforeEach`、module状態の初期化、SUT の cleanup 漏れ）。
 4. トレードオフ: `isolate:true` は `isolate:false` より遅い。速度が要るなら別途 `isolate:false` ＋ 本書前半の per-test fresh 化が必要だが、**「まず全 green」には isolate:true が最短**。
+
+## 実プロジェクト(copernicus-frontend)適用の最終結果
+
+harness の結論を本番（3926 tests / 638 files）へ適用し、**`isolate: false` のまま全 pass を達成**。しかも **CI 通常モード（並列）で約11%高速**（118.7s → 105.4s。transform/setup/environment/prepare のモジュール初期化コストが大幅減）。
+※ `--no-file-parallelism` 時は逆転（563s → 858s）。通常 CI は並列なので問題なし。
+
+### 適用した恒久修正（config/setup 2点）
+1. root `vite.config.ts` に **`unstubGlobals: true` / `unstubEnvs: true`**（`stubGlobal`/`stubEnv` は clear/restoreMocks では戻らない）。
+2. `src/vitest.setup.ts` の **`beforeAll` で `vi.useRealTimers()`**（fake timers のファイル間漏れ対策）。
+   - **重要な実地での補正**: harness では `afterEach(useRealTimers)` を推奨したが、それだと「`beforeAll(() => useFakeTimers())` で describe 全体を fake で回す」正当パターンを破壊する。
+     **ファイル単位の `beforeAll` に置くのが正解**（前ファイルの漏れを断ちつつ、ファイル内の意図的 fake は保持）。
+     残リスク: 同一ファイル内で「前テストが fake を残し後テストが real を要る」型は beforeAll では拾えない（出たら該当ファイルで個別 teardown）。
+
+### workspace 分割と退避（規模起因）
+commons 200+ ファイルを単一 project にすると、`isolate:false` の同一 worker に状態が蓄積し 23 ファイル付近から flake。→ components/packages/features 等へ細分化し各々独立 worker＋`fileParallelism:false`。
+真因が根深い 7 ファイルは pool/isolate を分けた project へ退避（useRef mock 依存・jotai 識別子ずれ・redux auto-mock 残留・msw await 漏れ・WIP）。
+
+### harness 診断と実結果の一致（答え合わせ）
+共有 QueryClient in-flight（容疑3）/ restoreMocks×describe直下 spyOn / stub 未復元 / fake timers 残留 / **useRef mock は timeout 因でない（反証）** —— すべて実プロジェクトで裏取りされた。
+
+## 退避ファイルの負債返済パターン（harness 実証）`src/repro/debt/`
+
+退避した 7 ファイルを `isolate:false` 本流へ戻すための移行パターンを再現・実証した。
+
+### 1. `useRef` グローバル mock の撤廃（`debt/useref/`）
+`setup.mock.hooks.ts` の「全テストで `react.useRef = vi.fn()`」は、**本物の useRef が要るフックを壊す**
+（`needs-real` で `TypeError: Cannot read properties of undefined (reading 'current')` を再現）。
+→ **グローバル mock を撤廃**し、useRef を mock したい個別テストだけ file-local に `vi.mock('react', …)`（`local-mock` で PASS）。
+これで `useStopPropagation.test.tsx` 系を `isolatedFilesNoMock` から本流へ戻せる。
+
+### 2. `await` 漏れ → tail rejection（`debt/awaitleak/`）
+`waitFor` 等を await せず放置すると、テストは pass するが**終了後に reject して Unhandled Rejection**になり、
+`isolate:false` の同一 worker で**次ファイルに飛び火**する（`leak.test.ts` で "Unhandled Rejection / 1 error" を再現）。
+→ **`await`（または `await expect(...).rejects.toThrow()`）で消化**（`fixed.test.ts` でクリーン）。
+`mswEnabledRouter.test.ts` はこの await 漏れを塞げば本流へ戻せる。
+
+### 3. jotai `resetModules` × dynamic import の識別子ずれ（`debt/jotai/`）
+`vi.resetModules()` 後に atom モジュールを再 import すると **atom オブジェクト参照が作り直され**、
+旧 atom で set した store を新 atom で読めない（`leak.test.ts` で `expected +0 to be 5` を再現）。
+→ **atom は静的 import で識別子を固定**し、**store はテスト毎 `createStore()`**（`fixed.test.ts` で PASS）。
+`packages/Menu/jotai/store.test.ts` はこの形にすれば `isolatedFilesNoMock` から戻せる。
