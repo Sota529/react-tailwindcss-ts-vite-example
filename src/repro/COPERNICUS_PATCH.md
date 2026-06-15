@@ -1,122 +1,115 @@
-# Copernicus(copernicus-frontend) 適用パッチ — 目標: `isolate: true` で全テスト pass
+# Copernicus(copernicus-frontend) 適用パッチ — 目標: `isolate: false` のまま全テスト pass（速度維持）
 
-本書は harness（`src/repro/`）で実証した結果を Copernicus 本体に当てるための具体パッチ。
-前提（本セッションで把握済みの Copernicus 構成）:
+`isolate: false` は速いが、**クロスファイル＋同一ファイル内の両方の状態汚染**を相手にする。
+harness（`src/repro/`）で採取5ファイルすべての真因と修正を実証済み。以下を上から順に当てる。
 
-- `vitest.workspace.ts` でプロジェクト定義（`globals: true` / `clearMocks: true` / `restoreMocks: true` は project 側）
-- `isolate: false` は **ルート `vite.config.ts` の `test`**
-- `setup.mock.ts` が `vi.doMock('react', …)` で `useRef` を `vi.fn()` 化（← timeout 原因としては**反証済み**、触らなくてよい）
-- 失敗5本: `DrawerModal/hooks.test.ts` / `AsahiCampaign/useQueryAsahiCampaign.test.ts` / `campaignRewardPoint/queries.test.ts` / `paymentCompleteNotify/mutations.test.ts` / `CartOrderButton/hooks.test.ts`
+前提（把握済みの Copernicus 構成）: workspace / `globals:true` / `clearMocks:true` / `restoreMocks:true`（project側）、`isolate:false`（root）、`setup.mock.ts` の `useRef=vi.fn()`（timeout 原因ではない＝反証済み、触らなくてよい）。
 
-実証要点: **`isolate:true` はファイル単位で worker/モジュール/グローバルを作り直す → クロスファイル汚染は原理的に消える**。
-残るのは「同一ファイル内のテスト間汚染」だけで、それは下の Patch 2 + Patch 3 で潰す。
+## 採取5ファイルの真因と修正（全て harness で実証）
+
+| ファイル | 真因（実証） | 修正 | 実証repro |
+|---|---|---|---|
+| AsahiCampaign/useQueryAsahiCampaign.test.ts | **共有 QueryClient の in-flight 持ち越し**（前テストの未解決クエリに dedup → pending） | Patch 3: **テスト毎 fresh QueryClient** | `rqcross/sharedclient`(再現)→`sharedclient-fix`(緑) |
+| paymentCompleteNotify/mutations.test.ts | 同上（共有 client / `isFakeTimers:false`・pending と一致） | Patch 3 | 同上 |
+| campaignRewardPoint/queries.test.ts | **`restoreMocks:true` が beforeEach 外の spyOn を毎テスト剥がす**（`is mock:false`→実API→pending） | Patch 5: spyOn を `beforeEach` へ / `vi.mock` 明示 | `rqcross/rm-modlevel`(再現)→`rm-beforeeach`(緑) |
+| DrawerModal/hooks.test.ts | **fake timers 残留**（他テストの `useFakeTimers` 未復元→`waitFor` hang） | Patch 2: 共通 `afterEach(useRealTimers)` | `rqcross/ftseq`(再現→緑) |
+| CartOrderButton/hooks.test.ts | `importActual` が他ファイルの auto-mock を拾う（要実コード確認） | Patch 6 + 実ファイル確認 | （未再現・要ファイル） |
 
 ---
 
-## Patch 1 — `isolate: true` へ（ルート `vite.config.ts`）
-
-`isolate` は **root-only オプション**。workspace の project に書いても無視されるので、必ずルートで。
+## Patch 1 — config（`isolate:false` のまま、自動復元を強化）
 
 ```diff
-// vite.config.ts
- export default defineConfig({
-   plugins: [react(), tsconfigPaths()],
+// vite.config.ts （root。isolate/unstub* は root-only なので必ずここ）
    test: {
--    isolate: false,
-+    isolate: true, // ← または行ごと削除（既定が true）。クロスファイル汚染を断つ
-     // globals / clearMocks / restoreMocks 等は現状のまま
+     globals: true,
+     isolate: false,
+     clearMocks: true,
+     restoreMocks: true,
++    unstubGlobals: true, // vi.stubGlobal を各テスト後に自動復元
++    unstubEnvs: true,    // vi.stubEnv を自動復元（process.env 直代入は別途手動 or stubEnv 化）
    },
- })
 ```
 
-> CLI で一時確認するなら: `vitest run`（既定 isolate:true）。`--no-isolate` を付けない。
+## Patch 2 — global 共通 teardown（既存 setup に追記）
 
-これ**単独で**、クロスファイル由来だった以下が直る見込み（harness の同型は全 PASS 化を確認）:
-`AsahiCampaign` / `paymentCompleteNotify`（共有 React module 経由の re-render 不発説）、
-`DrawerModal`（`useCallbackAfterOrderSuccess.test.ts` の fake timers が**別ファイル**になり波及しない）、
-`CartOrderButton`（`importActual` が他ファイルの auto-mock を拾わなくなる）。
-
----
-
-## Patch 2 — within-file 共通 teardown（global setup に追記）
-
-`isolate:true` でも「同一ファイル内のテスト間」では DOM・timer・stub が残る。
-既存の global setup（`setup.mock.ts` 等、`setupFiles` で読まれるファイル）に **以下の `afterEach` を追記**。
+`afterEach` は isolate に関係なく**毎テスト後**に走るので、クロスファイルの timer/DOM 残留もここで断てる。
 
 ```ts
 import { afterEach, vi } from 'vitest'
 import { cleanup } from '@testing-library/react'
 
 afterEach(() => {
-  cleanup()             // RTL の DOM 残留（globals:true なら自動だが明示しておくと確実）
-  vi.useRealTimers()    // fake timers 残留を断つ（clearMocks/restoreMocks では戻らない）
-  vi.unstubAllGlobals() // vi.stubGlobal 残留
-  vi.unstubAllEnvs()    // vi.stubEnv 残留
+  cleanup()          // DOM 残留
+  vi.useRealTimers() // fake timers 残留（DrawerModal の真因。clearMocks/restoreMocks では戻らない）
 })
 ```
 
-harness 実証: これだけで `leak`（DOM残留）と `ftseq`（fake timers残留→`waitFor` timeout）が PASS 化。
+## Patch 3 — テスト毎 fresh QueryClient（最重要・AsahiCampaign / paymentCompleteNotify）
 
-> 追加で config に `unstubGlobals: true` / `unstubEnvs: true` を入れてもよい（同等効果。ただし `vi.stubEnv` 専用で、`process.env.X = …` 直代入はカバーしない）。
-
----
-
-## Patch 3 — `campaignRewardPoint/queries.test.ts`（`is mock: false` → timeout）
-
-採取で `repo.get is mock: false`。これは **`restoreMocks: true` が各テスト前に `restoreAllMocks()` を走らせ、`beforeEach` 外で張った `spyOn` を毎回剥がしている**ため（harness `rm-modlevel` で再現＝**単独でも timeout**。`rm-beforeeach` で修正を実証）。
-`isolate:true` にしても within-file なので**残る**。次のどちらかを当てる。
-
-### 方法A: `spyOn` を `beforeEach` 内へ移す（最小変更）
+**module レベルの共有 QueryClient を使わない**。前テストの in-flight/cache が次テストへ持ち越され、同じ key が dedup されて永久 pending → `waitFor` timeout になる（`isFakeTimers:false`・pending という採取と一致／`rqcross/sharedclient` で再現）。
 
 ```diff
- import { repositories } from '~/repositories'
+-// ❌ どこか共有の client を使い回している
+-import { queryClient } from '~/lib/queryClient'
+-const wrapper = ({ children }) => (
+-  <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+-)
++// ✅ テスト毎に新しい client を作る
++const createWrapper = () => {
++  const queryClient = new QueryClient({
++    defaultOptions: { queries: { retry: false, gcTime: 0 } },
++  })
++  return ({ children }: { children: ReactNode }) => (
++    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
++  )
++}
++// renderHook(..., { wrapper: createWrapper() }) のように毎回生成
+```
 
--vi.spyOn(repositories, 'get').mockResolvedValue(mockData)   // ← module/describe 直下はNG
--vi.spyOn(repositories, 'post').mockResolvedValue(mockRes)
+> 既に renderHook 毎に新 client を作っているのに落ちる場合は、SUT 側が `~/lib/queryClient` のような **module-level シングルトン client** を直接参照している。その場合はテストの teardown で `queryClient.clear()` を呼ぶ（下）か、SUT を provider 経由に直す。
+> ```ts
+> import { queryClient } from '~/lib/queryClient'
+> afterEach(() => { queryClient.clear() })
+> ```
+
+## Patch 4 — jotai を使うなら fresh store（同型の汚染）
+
+```diff
+-// 既定ストア（module シングルトン）を共有
++const store = createStore()           // テスト毎に新規
++<Provider store={store}>{children}</Provider>
+```
+
+## Patch 5 — campaignRewardPoint（`is mock:false`）
+
+`restoreMocks:true` は各テスト前に `restoreAllMocks()` を走らせ、**`beforeEach` 外で張った spyOn を毎回剥がす**。
+
+```diff
+-vi.spyOn(repositories, 'get').mockResolvedValue(mockData)   // module/describe 直下はNG
 +beforeEach(() => {
 +  vi.spyOn(repositories, 'get').mockResolvedValue(mockData)
-+  vi.spyOn(repositories, 'post').mockResolvedValue(mockRes)
 +})
 ```
+または `vi.mock('~/repositories', () => ({ repositories: { get: vi.fn(), post: vi.fn() } }))` を hoist 宣言し、`beforeEach` で `vi.mocked(...).mockResolvedValue(...)`。
 
-### 方法B: `vi.mock` を明示宣言（spyOn インスタンス不一致も同時に回避）
+## Patch 6 — 残りの within/cross-file 雑多
 
-```ts
-vi.mock('~/repositories', () => ({
-  repositories: { get: vi.fn(), post: vi.fn() },
-}))
-import { repositories } from '~/repositories'
-
-beforeEach(() => {
-  vi.mocked(repositories.get).mockResolvedValue(mockData)
-  vi.mocked(repositories.post).mockResolvedValue(mockRes)
-})
-```
-
-> `vi.resetModules()` + `await import('~/repositories')` で SUT と別インスタンスに spy していた場合は方法B（または SUT と同一の import 経路に spy）で確実に直る。
-
----
-
-## Patch 4 — 残ったファイルの within-file チェック（必要時のみ）
-
-Patch 1+2 適用後も落ちるファイルがあれば、harness の判別表で対応:
-
-| within-file 症状 | 修正 |
+| 症状 | 修正 |
 |---|---|
-| 自ファイル内で `vi.useFakeTimers()` を張りっぱなし | Patch 2 の `afterEach(useRealTimers)` で解消。個別に `afterEach`/`finally` でも可 |
-| module レベルの可変状態がテスト間で累積 | リセット関数を用意し `beforeEach` で初期化（or singleton を避ける） |
-| SUT の `setInterval`/購読 cleanup 漏れ | unmount で `clearInterval` 等を返す（`useEffect` の cleanup） |
-| `spyOn` が `beforeEach` 外（`restoreMocks` で剥がれる） | Patch 3 と同じく `beforeEach` へ |
+| module レベル可変状態がテスト間で累積 | リセット関数＋`beforeEach` 初期化（or singleton を避ける） |
+| SUT の `setInterval`/購読 cleanup 漏れ | `useEffect` の cleanup で `clearInterval` 等を返す |
+| `globalThis`/`window` 直書き | `vi.stubGlobal` 経由に統一（Patch 1 で自動復元） |
+| `process.env.X = …` 直代入 | `vi.stubEnv('X', …)` に統一（Patch 1 で自動復元） |
+| CartOrderButton の `importActual` 不一致 | `vi.mock` を hoist し factory 内で `await importActual()` の必要部分だけ上書き（要実ファイル確認） |
 
 ---
 
 ## 適用順と検証
+1. Patch 1（config）+ Patch 2（共通 afterEach）→ `vitest run --no-file-parallelism`。DrawerModal と stub/env 系が消える。
+2. Patch 3（fresh QueryClient）→ AsahiCampaign / paymentCompleteNotify が緑に。
+3. Patch 5 → campaignRewardPoint。
+4. 残り（CartOrderButton 等）は実ファイルを見て Patch 6。
 
-1. Patch 1（isolate:true）→ `vitest run`。落ちるファイルが激減するはず。
-2. Patch 2（共通 afterEach）→ 再実行。timer/DOM/stub 由来が消える。
-3. 残りに Patch 3/4 を個別適用。
-4. 速度が問題なら、別途 `isolate:false` ＋ per-test fresh 化（FINDINGS 前半）へ。ただし「まず全 green」は isolate:true が最短。
-
-## オプション（必須でない）
-
-- `setup.mock.ts` の `useRef = vi.fn()` は timeout 原因ではない（反証済み）。テストで `useRef` 呼び出しを検証していないなら**削除してよい**が、全 green には不要。
+## まだテンプレ箇所（実ファイルで確定したい）
+正確な diff を出すために欲しいもの: `vite.config.ts` / `vitest.workspace.ts` / `setup.mock.ts`、`campaignRewardPoint/queries.test.ts`、`CartOrderButton/hooks.test.ts`、および AsahiCampaign 系が参照する QueryClient の定義（`~/lib/queryClient` 等）。
